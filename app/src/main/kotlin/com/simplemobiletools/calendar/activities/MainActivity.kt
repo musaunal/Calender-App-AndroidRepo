@@ -167,11 +167,6 @@ class MainActivity : SimpleActivity(), RefreshRecyclerViewListener {
             R.id.go_to_today -> goToToday()
             R.id.filter -> showFilterDialog()
             R.id.refresh_caldav_calendars -> refreshCalDAVCalendars(true)
-            R.id.add_holidays -> addHolidays()
-            R.id.add_birthdays -> tryAddBirthdays()
-            R.id.add_anniversaries -> tryAddAnniversaries()
-            R.id.import_events -> tryImportEvents()
-            R.id.export_events -> tryExportEvents()
             R.id.settings -> launchSettings()
             R.id.about -> launchAbout()
             android.R.id.home -> onBackPressed()
@@ -372,156 +367,6 @@ class MainActivity : SimpleActivity(), RefreshRecyclerViewListener {
         }
     }
 
-    private fun addHolidays() {
-        val items = getHolidayRadioItems()
-        RadioGroupDialog(this, items) {
-            toast(R.string.importing)
-            Thread {
-                val holidays = getString(R.string.holidays)
-                var eventTypeId = dbHelper.getEventTypeIdWithTitle(holidays)
-                if (eventTypeId == -1) {
-                    val eventType = EventType(0, holidays, resources.getColor(R.color.default_holidays_color))
-                    eventTypeId = dbHelper.insertEventType(eventType)
-                }
-
-                val result = IcsImporter(this).importEvents(it as String, eventTypeId, 0, false)
-                handleParseResult(result)
-                if (result != IcsImporter.ImportResult.IMPORT_FAIL) {
-                    runOnUiThread {
-                        updateViewPager()
-                    }
-                }
-            }.start()
-        }
-    }
-
-    private fun tryAddBirthdays() {
-        handlePermission(PERMISSION_READ_CONTACTS) {
-            if (it) {
-                Thread {
-                    addContactEvents(true) {
-                        if (it > 0) {
-                            toast(R.string.birthdays_added)
-                            updateViewPager()
-                        } else {
-                            toast(R.string.no_birthdays)
-                        }
-                    }
-                }.start()
-            } else {
-                toast(R.string.no_contacts_permission)
-            }
-        }
-    }
-
-    private fun tryAddAnniversaries() {
-        handlePermission(PERMISSION_READ_CONTACTS) {
-            if (it) {
-                Thread {
-                    addContactEvents(false) {
-                        if (it > 0) {
-                            toast(R.string.anniversaries_added)
-                            updateViewPager()
-                        } else {
-                            toast(R.string.no_anniversaries)
-                        }
-                    }
-                }.start()
-            } else {
-                toast(R.string.no_contacts_permission)
-            }
-        }
-    }
-
-    private fun handleParseResult(result: IcsImporter.ImportResult) {
-        toast(when (result) {
-            IcsImporter.ImportResult.IMPORT_OK -> R.string.holidays_imported_successfully
-            IcsImporter.ImportResult.IMPORT_PARTIAL -> R.string.importing_some_holidays_failed
-            else -> R.string.importing_holidays_failed
-        }, Toast.LENGTH_LONG)
-    }
-
-    private fun addContactEvents(birthdays: Boolean, callback: (Int) -> Unit) {
-        var eventsAdded = 0
-        val uri = ContactsContract.Data.CONTENT_URI
-        val projection = arrayOf(ContactsContract.Contacts.DISPLAY_NAME,
-                ContactsContract.CommonDataKinds.Event.CONTACT_ID,
-                ContactsContract.CommonDataKinds.Event.CONTACT_LAST_UPDATED_TIMESTAMP,
-                ContactsContract.CommonDataKinds.Event.START_DATE)
-
-        val selection = "${ContactsContract.Data.MIMETYPE} = ? AND ${ContactsContract.CommonDataKinds.Event.TYPE} = ?"
-        val type = if (birthdays) ContactsContract.CommonDataKinds.Event.TYPE_BIRTHDAY else ContactsContract.CommonDataKinds.Event.TYPE_ANNIVERSARY
-        val selectionArgs = arrayOf(ContactsContract.CommonDataKinds.Event.CONTENT_ITEM_TYPE, type.toString())
-        var cursor: Cursor? = null
-        try {
-            cursor = contentResolver.query(uri, projection, selection, selectionArgs, null)
-            if (cursor?.moveToFirst() == true) {
-                val dateFormats = getDateFormats()
-                val existingEvents = if (birthdays) dbHelper.getBirthdays() else dbHelper.getAnniversaries()
-                val importIDs = existingEvents.map { it.importId }
-                val eventTypeId = if (birthdays) getBirthdaysEventTypeId() else getAnniversariesEventTypeId()
-
-                do {
-                    val contactId = cursor.getIntValue(ContactsContract.CommonDataKinds.Event.CONTACT_ID).toString()
-                    val name = cursor.getStringValue(ContactsContract.Contacts.DISPLAY_NAME)
-                    val startDate = cursor.getStringValue(ContactsContract.CommonDataKinds.Event.START_DATE)
-
-                    for (format in dateFormats) {
-                        try {
-                            val formatter = SimpleDateFormat(format, Locale.getDefault())
-                            val date = formatter.parse(startDate)
-                            if (date.year < 70) {
-                                date.year = 70
-                            }
-
-                            val timestamp = (date.time / 1000).toInt()
-                            val source = if (birthdays) SOURCE_CONTACT_BIRTHDAY else SOURCE_CONTACT_ANNIVERSARY
-                            val lastUpdated = cursor.getLongValue(ContactsContract.CommonDataKinds.Event.CONTACT_LAST_UPDATED_TIMESTAMP)
-                            val event = Event(0, timestamp, timestamp, name, importId = contactId, flags = FLAG_ALL_DAY, repeatInterval = YEAR,
-                                    eventType = eventTypeId, source = source, lastUpdated = lastUpdated)
-
-                            if (!importIDs.contains(contactId)) {
-                                dbHelper.insert(event, false) {
-                                    eventsAdded++
-                                }
-                            }
-                            break
-                        } catch (e: Exception) {
-                        }
-                    }
-                } while (cursor.moveToNext())
-            }
-        } catch (e: Exception) {
-            showErrorToast(e)
-        } finally {
-            cursor?.close()
-        }
-
-        runOnUiThread {
-            callback(eventsAdded)
-        }
-    }
-
-    private fun getBirthdaysEventTypeId(): Int {
-        val birthdays = getString(R.string.birthdays)
-        var eventTypeId = dbHelper.getEventTypeIdWithTitle(birthdays)
-        if (eventTypeId == -1) {
-            val eventType = EventType(0, birthdays, resources.getColor(R.color.default_birthdays_color))
-            eventTypeId = dbHelper.insertEventType(eventType)
-        }
-        return eventTypeId
-    }
-
-    private fun getAnniversariesEventTypeId(): Int {
-        val anniversaries = getString(R.string.anniversaries)
-        var eventTypeId = dbHelper.getEventTypeIdWithTitle(anniversaries)
-        if (eventTypeId == -1) {
-            val eventType = EventType(0, anniversaries, resources.getColor(R.color.default_anniversaries_color))
-            eventTypeId = dbHelper.insertEventType(eventType)
-        }
-        return eventTypeId
-    }
-
     private fun updateView(view: Int) {
         calendar_fab.beVisibleIf(view != YEARLY_VIEW)
         config.storedView = view
@@ -616,20 +461,6 @@ class MainActivity : SimpleActivity(), RefreshRecyclerViewListener {
         }
     }
 
-    private fun tryImportEvents() {
-        handlePermission(PERMISSION_READ_STORAGE) {
-            if (it) {
-                importEvents()
-            }
-        }
-    }
-
-    private fun importEvents() {
-        FilePickerDialog(this) {
-            showImportEventsDialog(it)
-        }
-    }
-
     private fun tryImportEventsFromFile(uri: Uri) {
         when {
             uri.scheme == "file" -> showImportEventsDialog(uri.path)
@@ -655,35 +486,6 @@ class MainActivity : SimpleActivity(), RefreshRecyclerViewListener {
                 runOnUiThread {
                     updateViewPager()
                 }
-            }
-        }
-    }
-
-    private fun tryExportEvents() {
-        handlePermission(PERMISSION_WRITE_STORAGE) {
-            if (it) {
-                exportEvents()
-            }
-        }
-    }
-
-    private fun exportEvents() {
-        FilePickerDialog(this, pickFile = false, showFAB = true) {
-            ExportEventsDialog(this, it) { exportPastEvents, file, eventTypes ->
-                Thread {
-                    val events = dbHelper.getEventsToExport(exportPastEvents).filter { eventTypes.contains(it.eventType.toString()) }
-                    if (events.isEmpty()) {
-                        toast(R.string.no_entries_for_exporting)
-                    } else {
-                        IcsExporter().exportEvents(this, file, events as ArrayList<Event>, true) {
-                            toast(when (it) {
-                                IcsExporter.ExportResult.EXPORT_OK -> R.string.exporting_successful
-                                IcsExporter.ExportResult.EXPORT_PARTIAL -> R.string.exporting_some_entries_failed
-                                else -> R.string.exporting_failed
-                            })
-                        }
-                    }
-                }.start()
             }
         }
     }
@@ -746,69 +548,6 @@ class MainActivity : SimpleActivity(), RefreshRecyclerViewListener {
         calendar_fab.beVisible()
         config.storedView = DAILY_VIEW
         updateViewPager(dayCode)
-    }
-
-    private fun getHolidayRadioItems(): ArrayList<RadioItem> {
-        val items = ArrayList<RadioItem>()
-
-        LinkedHashMap<String, String>().apply {
-            put("Algeria", "algeria.ics")
-            put("Argentina", "argentina.ics")
-            put("Australia", "australia.ics")
-            put("België", "belgium.ics")
-            put("Bolivia", "bolivia.ics")
-            put("Brasil", "brazil.ics")
-            put("Canada", "canada.ics")
-            put("China", "china.ics")
-            put("Colombia", "colombia.ics")
-            put("Česká republika", "czech.ics")
-            put("Danmark", "denmark.ics")
-            put("Deutschland", "germany.ics")
-            put("Eesti", "estonia.ics")
-            put("España", "spain.ics")
-            put("Éire", "ireland.ics")
-            put("France", "france.ics")
-            put("Hanguk", "southkorea.ics")
-            put("Hellas", "greece.ics")
-            put("Hrvatska", "croatia.ics")
-            put("India", "india.ics")
-            put("Indonesia", "indonesia.ics")
-            put("Ísland", "iceland.ics")
-            put("Italia", "italy.ics")
-            put("Latvija", "latvia.ics")
-            put("Lietuva", "lithuania.ics")
-            put("Luxemburg", "luxembourg.ics")
-            put("Makedonija", "macedonia.ics")
-            put("Magyarország", "hungary.ics")
-            put("México", "mexico.ics")
-            put("Nederland", "netherlands.ics")
-            put("日本", "japan.ics")
-            put("Norge", "norway.ics")
-            put("Österreich", "austria.ics")
-            put("Pākistān", "pakistan.ics")
-            put("Polska", "poland.ics")
-            put("Portugal", "portugal.ics")
-            put("Россия", "russia.ics")
-            put("România", "romania.ics")
-            put("Schweiz", "switzerland.ics")
-            put("Singapore", "singapore.ics")
-            put("Srbija", "serbia.ics")
-            put("Slovenija", "slovenia.ics")
-            put("Slovensko", "slovakia.ics")
-            put("South Africa", "southafrica.ics")
-            put("Suomi", "finland.ics")
-            put("Sverige", "sweden.ics")
-            put("Ukraine", "ukraine.ics")
-            put("United Kingdom", "unitedkingdom.ics")
-            put("United States", "unitedstates.ics")
-
-            var i = 0
-            for ((country, file) in this) {
-                items.add(RadioItem(i++, country, file))
-            }
-        }
-
-        return items
     }
 
     private fun checkWhatsNewDialog() {
